@@ -75,36 +75,26 @@ def frame_extract(path, num_frames=20):
 # Function to detect and crop faces from frames
 def extract_faces(frames):
     face_frames = []
-    mp_face_detection = mp.solutions.face_detection
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
-    with mp_face_detection.FaceDetesction(model_selection=0, min_detection_confidence=0.5) as face_detector:
-        for frame in frames:
-            results = face_detector.process(frame)
+    for frame in frames:
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
-            if results.detections:
-                # Use the first detected face
-                detection = results.detections[0]
-                bbox = detection.location_data.relative_bounding_box
-
-                h, w, _ = frame.shape
-                x_min = int(bbox.xmin * w)
-                y_min = int(bbox.ymin * h)
-                box_width = int(bbox.width * w)
-                box_height = int(bbox.height * h)
-
-                # Add margin
-                margin = 30
-                x_min = max(0, x_min - margin)
-                y_min = max(0, y_min - margin)
-                x_max = min(w, x_min + box_width + 2 * margin)
-                y_max = min(h, y_min + box_height + 2 * margin)
-
-                face_crop = frame[y_min:y_max, x_min:x_max]
-                face_frames.append(face_crop)
-            else:
-                face_frames.append(frame)  # fallback to full frame
+        if len(faces) > 0:
+            (x, y, w, h) = faces[0]
+            margin = 30
+            x = max(0, x - margin)
+            y = max(0, y - margin)
+            x2 = min(frame.shape[1], x + w + 2 * margin)
+            y2 = min(frame.shape[0], y + h + 2 * margin)
+            face_crop = frame[y:y2, x:x2]
+            face_frames.append(face_crop)
+        else:
+            face_frames.append(frame)
 
     return face_frames
+
 
 # Function to preprocess frames for model input
 def preprocess_frames(face_frames, transform, sequence_length=20):
