@@ -73,6 +73,7 @@ def frame_extract(path, num_frames=20):
     return frames, frame_indices
 
 # Function to detect and crop faces from frames
+# Function to detect and crop faces using OpenCV (Haar Cascades)
 def extract_faces(frames):
     face_frames = []
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -94,6 +95,7 @@ def extract_faces(frames):
             face_frames.append(frame)
 
     return face_frames
+
 
 
 # Function to preprocess frames for model input
