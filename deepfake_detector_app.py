@@ -47,7 +47,7 @@ def frame_extract(path, num_frames=20):
     
     if total_frames == 0:
         st.error("Could not read video file. Please check the format and try again.")
-        return None
+        return None, None
     
     # If video has fewer frames than requested, use all frames
     if total_frames < num_frames:
@@ -72,7 +72,6 @@ def frame_extract(path, num_frames=20):
     vidcap.release()
     return frames, frame_indices
 
-# Function to detect and crop faces from frames
 # Function to detect and crop faces using OpenCV (Haar Cascades)
 def extract_faces(frames):
     face_frames = []
@@ -132,11 +131,14 @@ st.sidebar.markdown("Upload a video to detect if it's real or fake.")
 
 # Load the model
 @st.cache_resource
-def load_model(model_path):
+def load_model_from_bytes(model_bytes):
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = Model(num_classes=2).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        
+        # Load the model from bytes
+        model_data = torch.load(model_bytes, map_location=device)
+        model.load_state_dict(model_data)
         model.eval()
         return model, device
     except Exception as e:
@@ -147,17 +149,29 @@ def load_model(model_path):
 st.title("🕵️‍♂️ Deepfake Detection System")
 st.markdown("""
 This application uses a deep learning model to analyze videos and detect if they are real or manipulated (deepfakes).
-Upload a video file below to begin the analysis.
+Upload your model file and a video file below to begin the analysis.
 """)
 
-# Model path input
-model_path = st.text_input("Enter the path to your .pt model file:", "checkpoint.pt")
+# Model file uploader
+uploaded_model = st.file_uploader("Upload your PyTorch (.pt) model file", type=["pt", "pth"])
 
-# Load the model if path is provided
+# Load the model if uploaded
 model = None
 device = None
-if model_path:
-    model, device = load_model(model_path)
+if uploaded_model is not None:
+    # Create a temporary file for the model
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_model_file:
+        tmp_model_file.write(uploaded_model.getvalue())
+        model_path = tmp_model_file.name
+    
+    # Load the model
+    model, device = load_model_from_bytes(model_path)
+    
+    # Display confirmation if model loaded successfully
+    if model is not None:
+        st.success("Model loaded successfully!")
+    else:
+        st.error("Failed to load model. Please check the model file format.")
 
 # Set up the transforms
 im_size = 112
@@ -170,7 +184,7 @@ transform = transforms.Compose([
     transforms.Normalize(mean, std)
 ])
 
-# File uploader
+# Video file uploader
 uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov", "mkv"])
 
 if uploaded_file is not None:
@@ -261,10 +275,17 @@ if uploaded_file is not None:
             else:
                 st.error("Could not extract frames from video. Please check the video file.")
     else:
-        st.error("Model not loaded. Please check the model path and try again.")
+        st.error("Please upload a valid model file first.")
     
     # Clean up the temporary file
     os.unlink(video_path)
+    
+    # Clean up model temporary file if it exists
+    if uploaded_model is not None:
+        try:
+            os.unlink(model_path)
+        except:
+            pass
 
 # Add explanatory information
 st.markdown("---")
@@ -280,7 +301,3 @@ This deepfake detector uses a deep learning model combining a ResNext50 CNN with
 
 The model was trained on multiple deepfake datasets including Celeb-DF, DFDC, and FaceForensics++.
 """)
-
-# Footer
-st.markdown("---")
-st.caption("Deepfake Detector v1.0 | Created with Streamlit")
