@@ -1,9 +1,0 @@
-build-essential
-cmake
-libglib2.0-0
-libsm6
-libxext6
-libxrender-dev
-libssl-dev
-libffi-dev
-python3-dev
