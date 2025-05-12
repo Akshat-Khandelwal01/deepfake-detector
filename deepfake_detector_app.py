@@ -1,63 +1,28 @@
 import streamlit as st
 import torch
-from torch import nn
-from torchvision import models, transforms
+import torch.nn as nn
+import torchvision.models as models
+import torchvision.transforms as transforms
 import cv2
 import numpy as np
 import tempfile
-import face_recognition
-from PIL import Image
 import os
-import gc
-import psutil
-import sys
+from PIL import Image
 import time
+import mediapipe
 
-# Set page config
-st.set_page_config(page_title="DeepFake Detector", page_icon="🕵️", layout="wide")
+# Set page configuration
+st.set_page_config(
+    page_title="Deepfake Detector",
+    page_icon="🕵️",
+    layout="wide"
+)
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1E88E5;
-        text-align: center;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #424242;
-        margin-bottom: 2rem;
-        text-align: center;
-    }
-    .result-real {
-        font-size: 2rem;
-        color: #4CAF50;
-        text-align: center;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        background-color: #E8F5E9;
-    }
-    .result-fake {
-        font-size: 2rem;
-        color: #F44336;
-        text-align: center;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        background-color: #FFEBEE;
-    }
-    .confidence-meter {
-        margin-top: 1rem;
-        text-align: center;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Define model architecture (same as in the notebook)
+# Define the model architecture (same as in the notebook)
 class Model(nn.Module):
     def __init__(self, num_classes, latent_dim=2048, lstm_layers=1, hidden_dim=2048, bidirectional=False):
         super(Model, self).__init__()
-        model = models.resnext50_32x4d(pretrained=True)
+        model = models.resnext50_32x4d(pretrained=False)
         self.model = nn.Sequential(*list(model.children())[:-2])
         self.lstm = nn.LSTM(latent_dim, hidden_dim, lstm_layers, bidirectional)
         self.relu = nn.LeakyReLU()
@@ -75,328 +40,256 @@ class Model(nn.Module):
         return fmap, self.dp(self.linear1(torch.mean(x_lstm, dim=1)))
 
 # Function to extract frames from video
-def extract_frames(video_path, num_frames=10):
+def frame_extract(path, num_frames=20):
     frames = []
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    vidcap = cv2.VideoCapture(path)
+    total_frames = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    if total_frames <= 0:
-        return frames
-    
-    indices = np.linspace(0, total_frames - 1, num_frames, dtype=np.int32)
-    
-    for i in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-        ret, frame = cap.read()
-        if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
-    
-    cap.release()
-    return frames
-
-# Function to extract face from frame
-def extract_face(frame):
-    face_locations = face_recognition.face_locations(frame)
-    if not face_locations:
+    if total_frames == 0:
+        st.error("Could not read video file. Please check the format and try again.")
         return None
     
-    # Get the first face (assuming the main face)
-    top, right, bottom, left = face_locations[0]
-    face_image = frame[top:bottom, left:right]
-    return face_image
-
-# Function to preprocess faces for the model
-def preprocess_faces(face_frames, transform):
-    processed_faces = []
-    for frame in face_frames:
-        if frame is not None:
-            processed_face = transform(frame)
-            processed_faces.append(processed_face)
+    # If video has fewer frames than requested, use all frames
+    if total_frames < num_frames:
+        num_frames = total_frames
     
-    if not processed_faces:
-        return None
+    # Calculate interval to extract evenly spaced frames
+    interval = max(1, total_frames // num_frames)
     
-    # Ensure we have the required number of frames
-    # If we have less than 10, duplicate the last frame
-    while len(processed_faces) < 10:
-        processed_faces.append(processed_faces[-1])
+    count = 0
+    success = True
+    frame_indices = []
     
-    # If we have more than 10, take the first 10
-    processed_faces = processed_faces[:10]
-    
-    return torch.stack(processed_faces)
-
-@st.cache_resource
-def load_model(model_path="checkpoint.pt"):
-    model = Model(2)
-    
-    # Check if CUDA is available and use it, otherwise use CPU
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
-    # Display a message about the device being used
-    if torch.cuda.is_available():
-        st.sidebar.success("Using GPU: " + torch.cuda.get_device_name(0))
-    else:
-        st.sidebar.warning("Using CPU. Processing may be slower.")
-    
-    # Don't fail if the model file doesn't exist yet
-    if os.path.exists(model_path):
-        try:
-            # For large models, we need to handle loading differently
-            st.sidebar.info(f"Loading model from {model_path}. This may take a moment for large models...")
+    while success and len(frames) < num_frames:
+        success, image = vidcap.read()
+        if count % interval == 0 and success:
+            frame_indices.append(count)
+            # Convert BGR to RGB
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            frames.append(image)
+        count += 1
             
-            # Use torch.load with map_location to handle device placement
-            checkpoint = torch.load(model_path, map_location=device)
-            
-            # Check if checkpoint contains state_dict directly or nested
-            if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-                model.load_state_dict(checkpoint["state_dict"])
+    vidcap.release()
+    return frames, frame_indices
+
+# Function to detect and crop faces from frames
+def extract_faces(frames):
+    face_frames = []
+    mp_face_detection = mp.solutions.face_detection
+
+    with mp_face_detection.FaceDetesction(model_selection=0, min_detection_confidence=0.5) as face_detector:
+        for frame in frames:
+            results = face_detector.process(frame)
+
+            if results.detections:
+                # Use the first detected face
+                detection = results.detections[0]
+                bbox = detection.location_data.relative_bounding_box
+
+                h, w, _ = frame.shape
+                x_min = int(bbox.xmin * w)
+                y_min = int(bbox.ymin * h)
+                box_width = int(bbox.width * w)
+                box_height = int(bbox.height * h)
+
+                # Add margin
+                margin = 30
+                x_min = max(0, x_min - margin)
+                y_min = max(0, y_min - margin)
+                x_max = min(w, x_min + box_width + 2 * margin)
+                y_max = min(h, y_min + box_height + 2 * margin)
+
+                face_crop = frame[y_min:y_max, x_min:x_max]
+                face_frames.append(face_crop)
             else:
-                model.load_state_dict(checkpoint)
-                
-            st.sidebar.success(f"Model successfully loaded from {model_path}")
-        except Exception as e:
-            st.sidebar.error(f"Error loading model: {str(e)}")
-            st.stop()
-    else:
-        st.sidebar.error(f"Model file {model_path} not found. Please provide a valid path.")
-        st.stop()
-    
-    model = model.to(device)
-    model.eval()
-    return model, device
+                face_frames.append(frame)  # fallback to full frame
 
-def get_system_info():
-    # Get memory info
-    memory = psutil.virtual_memory()
-    memory_available_gb = memory.available / (1024**3)
-    memory_total_gb = memory.total / (1024**3)
-    
-    # Get CPU info
-    cpu_percent = psutil.cpu_percent()
-    cpu_count = psutil.cpu_count()
-    
-    # Get Python and package versions
-    python_version = sys.version.split()[0]
-    torch_version = torch.__version__
-    cv2_version = cv2.__version__
-    
-    return {
-        "memory_available_gb": round(memory_available_gb, 2),
-        "memory_total_gb": round(memory_total_gb, 2),
-        "memory_percent": memory.percent,
-        "cpu_percent": cpu_percent,
-        "cpu_count": cpu_count,
-        "python_version": python_version,
-        "torch_version": torch_version,
-        "cv2_version": cv2_version,
-        "cuda_available": torch.cuda.is_available(),
-        "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-        "cuda_device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
-    }
+    return face_frames
 
-def show_system_info():
-    info = get_system_info()
+# Function to preprocess frames for model input
+def preprocess_frames(face_frames, transform, sequence_length=20):
+    processed_frames = []
     
-    st.sidebar.title("System Information")
-    st.sidebar.info(f"""
-    **Memory:** {info['memory_available_gb']} GB available / {info['memory_total_gb']} GB total ({info['memory_percent']}% used)
+    for face in face_frames:
+        # Convert numpy array to PIL Image
+        face_pil = Image.fromarray(face)
+        # Apply transformations
+        processed_face = transform(face_pil)
+        processed_frames.append(processed_face)
     
-    **CPU:** {info['cpu_count']} cores, {info['cpu_percent']}% used
-    
-    **CUDA:** {"Available" if info['cuda_available'] else "Not available"}
-    {f"Device: {info['cuda_device_name']}" if info['cuda_available'] else ""}
-    
-    **Versions:**
-    - Python: {info['python_version']}
-    - PyTorch: {info['torch_version']}
-    - OpenCV: {info['cv2_version']}
-    """)
-
-def main():
-    st.markdown("<h1 class='main-header'>DeepFake Detector</h1>", unsafe_allow_html=True)
-    st.markdown("<p class='sub-header'>Upload a video to check if it's real or fake</p>", unsafe_allow_html=True)
-    
-    # Display system information
-    show_system_info()
-    
-    # Sidebar
-    st.sidebar.title("About")
-    st.sidebar.info(
-        "This application uses a deep learning model to detect whether "
-        "a video is real or has been manipulated (deepfake). "
-        "It works by extracting faces from the video, then analyzing them "
-        "using a ResNext-LSTM neural network."
-    )
-    
-    st.sidebar.title("Model Information")
-    st.sidebar.info(
-        "Architecture: ResNext50 + LSTM\n\n"
-        "Input: 10 face frames of size 112x112\n\n"
-        "Output: Classification (REAL/FAKE) with confidence score"
-    )
-    
-    # Model loading options
-    model_load_option = st.sidebar.radio(
-        "How would you like to load the model?",
-        ["Local path", "Google Drive", "Hugging Face"]
-    )
-    
-    if model_load_option == "Local path":
-        model_path = st.sidebar.text_input("Enter the path to checkpoint.pt", "checkpoint.pt")
-        st.sidebar.info("Make sure the model file is in the correct location")
-    
-    elif model_load_option == "Google Drive":
-        st.sidebar.info("To load from Google Drive:")
-        st.sidebar.code("""
-# Run this in a code cell before starting Streamlit
-from google.colab import drive
-drive.mount('/content/drive')
-# Then specify the path like: /content/drive/My Drive/checkpoint.pt
-        """)
-        model_path = st.sidebar.text_input("Enter the Google Drive path to checkpoint.pt", "/content/drive/My Drive/checkpoint.pt")
-    
-    elif model_load_option == "Hugging Face":
-        st.sidebar.info("To load from Hugging Face, enter your model repository name")
-        hf_model_name = st.sidebar.text_input("Hugging Face Repository", "username/model-name")
+    # Stack frames and ensure correct sequence length
+    if len(processed_frames) > 0:
+        processed_frames = torch.stack(processed_frames)
         
-        if hf_model_name:
-            # This code will only run if the user has entered a model name
-            try:
-                if not os.path.exists("checkpoint.pt"):
-                    st.sidebar.info("Downloading model from Hugging Face...")
-                    
-                    # Code to show this is where HF download would happen
-                    st.sidebar.code("""
-# In a normal setup, we'd download with:
-from huggingface_hub import hf_hub_download
-hf_hub_download(repo_id=hf_model_name, 
-                filename="checkpoint.pt",
-                local_dir=".")
-                    """)
-                    
-                    # For our current implementation, we'll still look for a local file
-                    st.sidebar.warning("For now, please make sure the model file exists locally.")
-            except Exception as e:
-                st.sidebar.error(f"Error downloading model: {e}")
+        # If we have more frames than needed, select evenly spaced frames
+        if len(processed_frames) > sequence_length:
+            indices = np.linspace(0, len(processed_frames) - 1, sequence_length, dtype=int)
+            processed_frames = processed_frames[indices]
+        
+        # If we have fewer frames than needed, repeat the last frame
+        while len(processed_frames) < sequence_length:
+            processed_frames = torch.cat([processed_frames, processed_frames[-1].unsqueeze(0)])
             
-            model_path = "checkpoint.pt"
-    
-    # Load model (uses cache to avoid reloading)
+        # Add batch dimension
+        processed_frames = processed_frames.unsqueeze(0)
+        
+    return processed_frames
+
+# Create sidebar header
+st.sidebar.title("Deepfake Detector")
+st.sidebar.markdown("Upload a video to detect if it's real or fake.")
+
+# Load the model
+@st.cache_resource
+def load_model(model_path):
     try:
-        if model_load_option == "Local path" or model_load_option == "Google Drive":
-            model, device = load_model(model_path)
-        else:  # Hugging Face
-            model, device = load_model("checkpoint.pt")
-        model_loaded = True
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = Model(num_classes=2).to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
+        return model, device
     except Exception as e:
         st.error(f"Error loading model: {e}")
-        model_loaded = False
+        return None, None
+
+# Main page content
+st.title("🕵️‍♂️ Deepfake Detection System")
+st.markdown("""
+This application uses a deep learning model to analyze videos and detect if they are real or manipulated (deepfakes).
+Upload a video file below to begin the analysis.
+""")
+
+# Model path input
+model_path = st.text_input("Enter the path to your .pt model file:", "checkpoint.pt")
+
+# Load the model if path is provided
+model = None
+device = None
+if model_path:
+    model, device = load_model(model_path)
+
+# Set up the transforms
+im_size = 112
+mean = [0.485, 0.456, 0.406]
+std = [0.229, 0.224, 0.225]
+
+transform = transforms.Compose([
+    transforms.Resize((im_size, im_size)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean, std)
+])
+
+# File uploader
+uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov", "mkv"])
+
+if uploaded_file is not None:
+    # Save uploaded file to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        video_path = tmp_file.name
     
-    # Video file uploader
-    uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov", "mkv"])
-    
-    if uploaded_file is not None and model_loaded:
-        # Save the uploaded file to a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            video_path = tmp_file.name
-        
-        # Show the uploaded video
-        st.video(video_path)
-        
-        # Process button
-        if st.button("Analyze Video"):
-            with st.spinner("Processing..."):
-                # Extract frames from the video
-                frames = extract_frames(video_path, num_frames=20)
+    if model is not None and device is not None:
+        # Show progress information
+        with st.spinner("Processing video..."):
+            # Process the video
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Extract frames
+            status_text.text("Extracting frames from video...")
+            frames, frame_indices = frame_extract(video_path, num_frames=30)
+            progress_bar.progress(25)
+            
+            if frames is not None and len(frames) > 0:
+                # Display sample frames
+                st.subheader("Sample Frames")
+                cols = st.columns(min(3, len(frames)))
+                for i, col in enumerate(cols):
+                    if i < len(frames):
+                        col.image(frames[i * len(frames) // len(cols)], caption=f"Frame {frame_indices[i * len(frames) // len(cols)]}")
                 
-                if not frames:
-                    st.error("Could not extract frames from the video. Please try another file.")
-                else:
-                    # Extract faces from frames
-                    face_frames = []
-                    for frame in frames:
-                        face = extract_face(frame)
-                        if face is not None:
-                            face_frames.append(face)
+                # Extract faces
+                status_text.text("Detecting and extracting faces...")
+                face_frames = extract_faces(frames)
+                progress_bar.progress(50)
+                
+                # Show face crops
+                if len(face_frames) > 0:
+                    st.subheader("Detected Faces")
+                    cols = st.columns(min(3, len(face_frames)))
+                    for i, col in enumerate(cols):
+                        if i < len(face_frames):
+                            col.image(face_frames[i * len(face_frames) // len(cols)], caption=f"Face {i * len(face_frames) // len(cols)}")
                     
-                    # Show some extracted faces
-                    if face_frames:
-                        st.subheader("Extracted Faces")
-                        cols = st.columns(min(5, len(face_frames)))
-                        for i, col in enumerate(cols):
-                            if i < len(face_frames):
-                                col.image(face_frames[i], use_column_width=True)
+                    # Preprocess for model
+                    status_text.text("Preprocessing for model...")
+                    processed_frames = preprocess_frames(face_frames, transform, sequence_length=20)
+                    progress_bar.progress(75)
+                
+                    # Make prediction
+                    status_text.text("Making prediction...")
+                    with torch.no_grad():
+                        processed_frames = processed_frames.to(device)
+                        _, outputs = model(processed_frames)
+                        _, preds = torch.max(outputs, 1)
+                        softmax = nn.Softmax(dim=1)
+                        probabilities = softmax(outputs)
+                    
+                    progress_bar.progress(100)
+                    
+                    # Display results
+                    st.subheader("Results:")
+                    result_container = st.container()
+                    
+                    with result_container:
+                        cols = st.columns(2)
                         
-                        # Preprocess the face frames
-                        transform = transforms.Compose([
-                            transforms.ToPILImage(),
-                            transforms.Resize((112, 112)),
-                            transforms.ToTensor(),
-                            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                        ])
+                        prediction = "FAKE" if preds.item() == 0 else "REAL"
+                        fake_prob = probabilities[0][0].item() * 100
+                        real_prob = probabilities[0][1].item() * 100
                         
-                        processed_faces = preprocess_faces(face_frames, transform)
+                        # Display prediction with color
+                        if prediction == "FAKE":
+                            cols[0].markdown(f"<h1 style='color:red'>Prediction: {prediction}</h1>", unsafe_allow_html=True)
+                        else:
+                            cols[0].markdown(f"<h1 style='color:green'>Prediction: {prediction}</h1>", unsafe_allow_html=True)
                         
-                        if processed_faces is not None:
-                            # Add batch dimension
-                            inputs = processed_faces.unsqueeze(0).to(device)
-                            
-                            # Forward pass - handle out of memory errors
-                            try:
-                                with torch.no_grad():
-                                    # Add a progress message
-                                    progress_text = st.empty()
-                                    progress_text.text("Running model inference...")
-                                    
-                                    # Process model in chunks if needed for large models
-                                    start_time = time.time()
-                                    _, outputs = model(inputs)
-                                    inference_time = time.time() - start_time
-                                    
-                                    progress_text.text(f"Model inference completed in {inference_time:.2f} seconds")
-                                    probs = torch.nn.functional.softmax(outputs, dim=1)
-                                
-                                # Get the prediction
-                                _, predicted = torch.max(outputs, 1)
-                                confidence = probs[0][predicted.item()].item() * 100
-                                
-                                # Clean up to free memory
-                                del outputs, probs
-                                gc.collect()
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                                    
-                            except RuntimeError as e:
-                                if 'out of memory' in str(e).lower():
-                                    st.error("💥 GPU out of memory error! Try processing a smaller video or use CPU.")
-                                    st.info("Tip: For large models, make sure you have enough GPU memory or switch to CPU processing.")
-                                    st.stop()
-                                else:
-                                    st.error(f"Error during model inference: {e}")
-                                    st.stop()
-                            
-                            # Display the result
-                            st.subheader("Analysis Result")
-                            
-                            if predicted.item() == 1:  # REAL
-                                st.markdown(f"<div class='result-real'>REAL VIDEO (Confidence: {confidence:.2f}%)</div>", unsafe_allow_html=True)
-                            else:  # FAKE
-                                st.markdown(f"<div class='result-fake'>FAKE VIDEO (Confidence: {confidence:.2f}%)</div>", unsafe_allow_html=True)
-                            
-                            # Confidence meter
-                            st.markdown("<div class='confidence-meter'>Confidence Meter:</div>", unsafe_allow_html=True)
-                            st.progress(confidence / 100)
-                    else:
-                        st.error("No faces detected in the video. Please try another file.")
+                        # Display confidence
+                        cols[1].markdown("<h3>Confidence:</h3>", unsafe_allow_html=True)
+                        cols[1].metric("FAKE", f"{fake_prob:.2f}%")
+                        cols[1].metric("REAL", f"{real_prob:.2f}%")
+                        
+                        # Display progress bars for confidence
+                        st.markdown("<h3>Prediction Confidence:</h3>", unsafe_allow_html=True)
+                        st.progress(fake_prob / 100)
+                        st.markdown(f"<p>Fake: {fake_prob:.2f}%</p>", unsafe_allow_html=True)
+                        st.progress(real_prob / 100)
+                        st.markdown(f"<p>Real: {real_prob:.2f}%</p>", unsafe_allow_html=True)
+                else:
+                    st.error("No faces detected in the video. Please try with another video.")
+            else:
+                st.error("Could not extract frames from video. Please check the video file.")
+    else:
+        st.error("Model not loaded. Please check the model path and try again.")
+    
+    # Clean up the temporary file
+    os.unlink(video_path)
 
-        # Clean up the temporary file
-        try:
-            os.unlink(video_path)
-        except:
-            pass
+# Add explanatory information
+st.markdown("---")
+st.subheader("How it works")
+st.markdown("""
+This deepfake detector uses a deep learning model combining a ResNext50 CNN with an LSTM network to analyze video sequences:
 
-if __name__ == "__main__":
-    main()
+1. **Frame Extraction**: The system extracts frames from your uploaded video
+2. **Face Detection**: Faces are detected and cropped from each frame
+3. **Feature Extraction**: A CNN extracts spatial features from face images
+4. **Temporal Analysis**: An LSTM analyzes the sequence of features to detect inconsistencies
+5. **Classification**: The model classifies the video as REAL or FAKE with a confidence score
+
+The model was trained on multiple deepfake datasets including Celeb-DF, DFDC, and FaceForensics++.
+""")
+
+# Footer
+st.markdown("---")
+st.caption("Deepfake Detector v1.0 | Created with Streamlit")
