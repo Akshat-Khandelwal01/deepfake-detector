@@ -9,7 +9,7 @@ import tempfile
 import os
 from PIL import Image
 import time
-import mediapipe
+
 
 # Set page configuration
 st.set_page_config(
@@ -95,7 +95,6 @@ def extract_faces(frames):
             face_frames.append(frame)
 
     return face_frames
-
 
 
 # Function to preprocess frames for model input
