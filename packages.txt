@@ -3,3 +3,9 @@ libglib2.0-0
 libsm6
 libxrender1
 libxext6
+ffmpeg
+libavcodec-dev
+libavformat-dev
+libswscale-dev
+libavutil-dev
+libavfilter-dev
