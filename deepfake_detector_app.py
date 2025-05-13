@@ -71,7 +71,16 @@ class Model(nn.Module):
 def frame_extract(path, num_frames=20):
     frames = []
     vidcap = cv2.VideoCapture(path)
+    
+    if not vidcap.isOpened():
+        st.error("Could not open video file. Please check the format and try again.")
+        return None, None
+    
     total_frames = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = vidcap.get(cv2.CAP_PROP_FPS)
+    duration = total_frames / fps if fps > 0 else 0
+    
+    st.write(f"Video Info: {total_frames} frames, {fps:.2f} FPS, Duration: {duration:.2f} seconds")
     
     if total_frames == 0:
         st.error("Could not read video file. Please check the format and try again.")
@@ -162,15 +171,30 @@ st.sidebar.markdown("Upload a video to detect if it's real or fake.")
 def load_model_from_bytes(model_bytes):
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        st.info(f"Using device: {device}")
+        
         model = Model(num_classes=2).to(device)
         
         # Load the model from bytes
         model_data = torch.load(model_bytes, map_location=device)
-        model.load_state_dict(model_data)
+        
+        # Check if the model is a state dict or a full model
+        if isinstance(model_data, dict) and 'state_dict' in model_data:
+            # Load from checkpoint format
+            model.load_state_dict(model_data['state_dict'])
+        elif isinstance(model_data, dict) and all(k.startswith('model.') or k.startswith('lstm.') or 
+                                                 k.startswith('linear') or k.startswith('avgpool') for k in model_data.keys()):
+            # It's a state dict with model prefix
+            model.load_state_dict(model_data)
+        else:
+            # Assume it's a direct state dict
+            model.load_state_dict(model_data)
+        
         model.eval()
         return model, device
     except Exception as e:
         st.error(f"Error loading model: {e}")
+        st.error("Please check that your model file is compatible with the expected architecture.")
         return None, None
 
 # Main page content
@@ -179,6 +203,9 @@ st.markdown("""
 This application uses a deep learning model to analyze videos and detect if they are real or manipulated (deepfakes).
 Upload your model file and a video file below to begin the analysis.
 """)
+
+# Note about file size limits
+st.info(f"This app supports files up to {MAX_FILE_SIZE}MB in size. Larger videos may require longer processing times.")
 
 # Model file uploader
 uploaded_model = st.file_uploader("Upload your PyTorch (.pt) model file", type=["pt", "pth"])
@@ -212,18 +239,31 @@ transform = transforms.Compose([
     transforms.Normalize(mean, std)
 ])
 
-# Video file uploader
+# Video file uploader with larger file size support
 uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov", "mkv"])
 
 if uploaded_file is not None:
-    # Save uploaded file to a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        video_path = tmp_file.name
+    # Check file size
+    file_details = {"FileName": uploaded_file.name, "FileType": uploaded_file.type}
+    file_size_mb = uploaded_file.size / (1024 * 1024)  # Convert bytes to MB
+    st.write(f"File Size: {file_size_mb:.2f} MB")
+    
+    # Save uploaded file to a temporary file - use a try-except block to handle large files
+    try:
+        with st.spinner(f"Processing video file ({file_size_mb:.2f} MB)..."):
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+                # Write in chunks to handle large files better
+                chunk_size = 5 * 1024 * 1024  # 5MB chunks
+                for chunk in iter(lambda: uploaded_file.read(chunk_size), b""):
+                    tmp_file.write(chunk)
+                video_path = tmp_file.name
+    except Exception as e:
+        st.error(f"Error processing the uploaded file: {str(e)}")
+        st.error("This might be due to file size or format issues. Try with a smaller file or different format.")
     
     if model is not None and device is not None:
         # Show progress information
-        with st.spinner("Processing video..."):
+        with st.spinner("Analyzing video..."):
             # Process the video
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -305,15 +345,16 @@ if uploaded_file is not None:
     else:
         st.error("Please upload a valid model file first.")
     
-    # Clean up the temporary file
-    os.unlink(video_path)
-    
-    # Clean up model temporary file if it exists
-    if uploaded_model is not None:
-        try:
+    # Clean up temporary files
+    try:
+        if 'video_path' in locals():
+            os.unlink(video_path)
+        # Clean up model temporary file if it exists
+        if uploaded_model is not None and 'model_path' in locals():
             os.unlink(model_path)
-        except:
-            pass
+    except Exception as e:
+        st.warning(f"Warning: Could not clean up temporary files: {str(e)}")
+
 
 # Add explanatory information
 st.markdown("---")
