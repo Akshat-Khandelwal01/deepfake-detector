@@ -370,4 +370,3 @@ This deepfake detector uses a deep learning model combining a ResNext50 CNN with
 
 The model was trained on multiple deepfake datasets including Celeb-DF, DFDC, and FaceForensics++.
 """)
-
